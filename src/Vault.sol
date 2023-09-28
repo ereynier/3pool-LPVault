@@ -11,7 +11,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.
 
 /* ========== Interfaces, libraries, contracts ========== */
 interface CurvePool {
-    function add_liquidity(uint256[3] memory amounts, uint256 min_mint_amount) external returns (uint256);
+    function add_liquidity(uint256[3] memory amounts, uint256 min_mint_amount) external;
     function remove_liquidity_one_coin(uint256 _token_amount, int128 i, uint256 min_amount) external;
     function calc_withdraw_one_coin(uint256 _token_amount, int128 i) external view returns (uint256);
     function calc_token_amount(uint256[3] memory amounts, bool deposit) external view returns (uint256);
@@ -31,9 +31,9 @@ contract Vault is ERC20, Ownable, ReentrancyGuard {
 
     error Vault__InvalidAmount(uint256 amount);
     error Vault__InvalidToken(address token);
-    error Vault__AllowanceToLow(uint256 amount);
+    error Vault__AllowanceToLow(uint256 amount, uint256 allowed);
     error Vault__ApproveFailed(uint256 amount);
-    error Vault__TransferFailed(address token, uint256 amount);
+    error Vault__TransferFailed(address token, uint256 amount, address from, address to);
     error Vault__InvalidAddress(address addr);
 
     /* ========== Types ========== */
@@ -56,6 +56,7 @@ contract Vault is ERC20, Ownable, ReentrancyGuard {
     /* ========== Events ========== */
 
     event slippageChanged(uint256 newSlippage);
+    event lpMinted(uint256 amount);
 
     /* ========== Modifiers ========== */
 
@@ -105,12 +106,12 @@ contract Vault is ERC20, Ownable, ReentrancyGuard {
      */
     function deposit(uint256 _amountInWei) external greaterThanZero(_amountInWei) nonReentrant {
         if (IERC20(DAI).allowance(msg.sender, address(this)) < _amountInWei) {
-            revert Vault__AllowanceToLow(_amountInWei);
+            revert Vault__AllowanceToLow(_amountInWei, IERC20(DAI).allowance(msg.sender, address(this)));
         }
 
         bool success = IERC20(DAI).transferFrom(msg.sender, address(this), _amountInWei);
         if (!success) {
-            revert Vault__TransferFailed(DAI, _amountInWei);
+            revert Vault__TransferFailed(DAI, _amountInWei, msg.sender, address(this));
         }
 
         success = IERC20(DAI).approve(poolAddress, _amountInWei);
@@ -120,40 +121,57 @@ contract Vault is ERC20, Ownable, ReentrancyGuard {
 
         uint256[3] memory amounts = [_amountInWei, 0, 0];
         uint256 min_mint_amount = pool.calc_token_amount(amounts, true) * (1 ether - slippage) / 1 ether;
-        uint256 lp_received = pool.add_liquidity(amounts, min_mint_amount);
-
+        uint256 balance_before = IERC20(lp_token_address).balanceOf(address(this));
+        pool.add_liquidity(amounts, min_mint_amount);
+        uint256 lp_received = IERC20(lp_token_address).balanceOf(address(this)) - balance_before;
         // Stake LP tokens
-        IERC20(lp_token_address).approve(gauge_address, lp_received);
+        success = IERC20(lp_token_address).approve(gauge_address, lp_received);
+        if (!success) {
+            revert Vault__ApproveFailed(lp_received);
+        }
         gauge.deposit(lp_received);
 
         _mint(msg.sender, lp_received);
+        emit lpMinted(lp_received);
     }
 
     /**
      * @param _lpAmount The amount of LP tokens to withdraw.
-     * @notice This function will withdraw the specified amount of LP tokens and send the DAI to the caller.
+     * @notice This function will withdraw the specified amount of LP tokens and send the DAI to the caller. Whatever the slippage is.
      * @dev This function will revert if the caller does not have enough LP tokens.
      * @dev This function will revert if the caller does not have enough allowance.
      * @dev This function will revert if the transferFrom fails.
      */
     function withdraw(uint256 _lpAmount) external greaterThanZero(_lpAmount) nonReentrant {
-        if (IERC20(address(this)).allowance(msg.sender, address(this)) < _lpAmount) {
-            revert Vault__AllowanceToLow(_lpAmount);
+        if (allowance(msg.sender, address(this)) < _lpAmount) {
+            revert Vault__AllowanceToLow(_lpAmount, allowance(msg.sender, address(this)));
         }
-
-        bool success = transferFrom(msg.sender, address(this), _lpAmount);
-        if (!success) {
-            revert Vault__TransferFailed(address(this), _lpAmount);
+        if (balanceOf(msg.sender) < _lpAmount) {
+            revert Vault__InvalidAmount(_lpAmount);
         }
+        _burn(msg.sender, _lpAmount);
 
         // Unstake LP tokens
         gauge.withdraw(_lpAmount);
 
+        uint256 balanceBefore = IERC20(DAI).balanceOf(address(this));
         uint256 min_amount = 0;
         pool.remove_liquidity_one_coin(_lpAmount, 0, min_amount);
-        _burn(msg.sender, _lpAmount);
+        uint256 amount_received = IERC20(DAI).balanceOf(address(this)) - balanceBefore;
+
+        // Send back DAI to user
+        bool success = IERC20(DAI).transfer(msg.sender, amount_received);
+        if (!success) {
+            revert Vault__TransferFailed(DAI, amount_received, address(this), msg.sender);
+        }
     }
 
+    /**
+     * @notice This function will harvest the CRV tokens and send them to the charity, the caller and the owner. (1%, 1%, 98%)
+     * @dev This function will revert if the charity address is invalid.
+     * @dev This function will revert if the transfer fails.
+     * @dev This function will revert if the mint fails.
+     */
     function harvest() external {
         // Harvest CRV, swap to accepted token, split it between the charity, the caller (and the Owner?)
         if (charity == address(0)) {
@@ -161,24 +179,23 @@ contract Vault is ERC20, Ownable, ReentrancyGuard {
         }
 
         minter.mint(gauge_address);
-        
+
         // TODO: Swap to accepted token (DAI ?)
 
         uint256 balance = IERC20(CRV).balanceOf(address(this));
         bool success = IERC20(CRV).transfer(msg.sender, balance / 100);
         if (!success) {
-            revert Vault__TransferFailed(CRV, balance / 100);
+            revert Vault__TransferFailed(CRV, balance / 100, address(this), msg.sender);
         }
 
         success = IERC20(CRV).transfer(owner(), balance / 100);
-
         if (!success) {
-            revert Vault__TransferFailed(CRV, balance / 100);
+            revert Vault__TransferFailed(CRV, balance / 100, address(this), owner());
         }
 
         success = IERC20(CRV).transfer(charity, IERC20(CRV).balanceOf(address(this)));
         if (!success) {
-            revert Vault__TransferFailed(CRV, IERC20(CRV).balanceOf(address(this)));
+            revert Vault__TransferFailed(CRV, IERC20(CRV).balanceOf(address(this)), address(this), charity);
         }
     }
 
@@ -187,7 +204,7 @@ contract Vault is ERC20, Ownable, ReentrancyGuard {
      * @notice This function is used to set the slippage tolerence.
      */
     function setSlippage(uint256 _slippage) external onlyOwner {
-        if (slippage > 0.01 ether) {
+        if (_slippage > 0.01 ether) {
             revert Vault__InvalidAmount(_slippage);
         }
         slippage = _slippage;
