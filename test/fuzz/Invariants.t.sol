@@ -50,7 +50,10 @@ contract InvariantsTest is StdInvariant, Test {
         vaultLPs = IERC20(gauge_address).balanceOf(address(vault));
 
         assertEq(vaultLPs, mintedLPs);
+        console.log("LPs ", vaultLPs);
     }
 
-    function invariant_gettersShouldNotRevert() public view {}
+    function invariant_gettersShouldNotRevert() public view {
+        vault.exchangeRate();
+    }
 }

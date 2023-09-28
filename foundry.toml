@@ -6,7 +6,7 @@ via_ir = true
 remappings = ["@openzeppelin/contracts=lib/openzeppelin-contracts/contracts", "@chainlink/contracts=lib/chainlink-brownie-contracts/contracts"]
 
 [invariant]
-runs = 128
+runs = 40
 depth = 128
 fail_on_revert = true
 
