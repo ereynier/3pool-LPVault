@@ -9,6 +9,9 @@ import {HelperConfig} from "../../script/HelperConfig.s.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/ERC20Mock.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
+interface Gauge {
+    function claimable_tokens(address addr) external returns (uint256);
+}
 
 contract PresaleTest is Test {
     VaultDeployer deployer;
@@ -125,13 +128,24 @@ contract PresaleTest is Test {
         IERC20(DAI).approve(address(vault), 100 ether);
         vault.deposit(100 ether);
         vm.stopPrank();
-        vm.warp(365 days);
+        vm.warp(block.timestamp + 365 days);
+        Gauge gauge = Gauge(gauge_address);
+        uint256 claimable = gauge.claimable_tokens(address(vault));
+        console.log(claimable);
         vm.startPrank(USER_2);
         vault.harvest();
         vm.stopPrank();
         assertGt(IERC20(CRV).balanceOf(USER_2), 0);
         assertGt(IERC20(CRV).balanceOf(CHARITY), 0);
         assertGt(IERC20(CRV).balanceOf(OWNER), 0);
+    }
+
+    function testHarvestRevertIfCharityAddressIsZero() public {
+        vm.startPrank(OWNER);
+        vault.setCharity(address(0));
+        vm.expectRevert(abi.encodeWithSelector(Vault.Vault__InvalidAddress.selector, address(0)));
+        vault.harvest();
+        vm.stopPrank();
     }
 
     /* ===== setSlippage Tests ===== */

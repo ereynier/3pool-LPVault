@@ -29,7 +29,7 @@ update:; forge update
 
 build:; forge build
 
-test :; forge test 
+test :; forge test --fork-url $(ETHEREUM_RPC_URL)
 
 coverage :; forge coverage --report debug > coverage-report.txt
 
